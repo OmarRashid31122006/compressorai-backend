@@ -1,6 +1,5 @@
 """
 Datasets Router — CompressorAI v5
-
 Production changes vs original:
   - File size validated from Content-Length BEFORE reading into memory
   - Upload failure recovery: if processed upload fails, raw file is deleted (no orphans)
@@ -13,11 +12,9 @@ import io
 import re
 import logging
 import pandas as pd
-
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Request, Query
 from typing import Optional
 from datetime import datetime, timezone
-
 from config import get_supabase_client
 from deps import get_current_user, require_admin
 from storage import (
@@ -38,7 +35,6 @@ def utc_now() -> str:
 
 
 def _safe_filename(name: str) -> str:
-    """Strip non-ASCII and dangerous characters from filename."""
     name = re.sub(r"[^\w\s\-.]", "", name).strip()
     return name or "dataset"
 
@@ -62,28 +58,13 @@ async def upload_dataset(
     cos_phi:    Optional[float] = Form(None),
     current_user=Depends(get_current_user),
 ):
-    """
-    Engineer uploads a dataset for a linked unit.
-
-    Steps:
-      1. Content-Length pre-check (before reading body)
-      2. Verify engineer is linked to this unit
-      3. Read + validate file (type, size, columns)
-      4. Upload raw file to Supabase Storage
-      5. Clean/preprocess → upload processed file
-         (if processed upload fails → delete raw file to avoid orphans)
-      6. Save dataset record to DB
-      7. Check auto-retrain threshold
-    """
     supabase = get_supabase_client()
     user_id  = current_user["sub"]
 
-    # ── 1. Content-Length pre-check ──────────────────────────
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > MAX_FILE_BYTES + 1024:
         raise HTTPException(413, f"File too large. Maximum {MAX_FILE_BYTES // (1024*1024)} MB allowed.")
 
-    # ── 2. Verify unit + engineer link ───────────────────────
     unit = supabase.table("compressor_units") \
         .select("id,unit_id,compressor_type_id") \
         .eq("id", unit_uuid).eq("is_active", True).execute()
@@ -97,7 +78,6 @@ async def upload_dataset(
         if not link.data:
             raise HTTPException(403, "You are not linked to this unit.")
 
-    # ── 3. Read + validate ────────────────────────────────────
     fname = _safe_filename(file.filename or "dataset.xlsx")
     ext   = "." + fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
     if ext not in ALLOWED_EXTS:
@@ -131,12 +111,9 @@ async def upload_dataset(
                        "Discharge Pressure, Current (Amp).",
         })
 
-    was_raw = validation.get("was_raw", False)
-
-    # ── 4. Upload raw file ────────────────────────────────────
+    was_raw  = validation.get("was_raw", False)
     raw_path = upload_raw_dataset(unit_uuid, user_id, raw_bytes, fname)
 
-    # ── 5. Clean + upload processed ──────────────────────────
     try:
         clean_result     = auto_clean(df_raw, user_params)
         df_clean         = clean_result["df"]
@@ -145,12 +122,10 @@ async def upload_dataset(
             unit_uuid, user_id, _df_to_bytes(df_clean), fname
         )
     except Exception as e:
-        # Roll back raw upload to avoid orphan files
         logger.error(f"Processed upload failed for unit {unit_uuid}: {e} — rolling back raw.")
         delete_dataset_file(raw_path)
         raise HTTPException(500, f"Failed to process dataset: {str(e)}")
 
-    # ── 6. Save DB record ─────────────────────────────────────
     record = {
         "unit_id":             unit_uuid,
         "user_id":             user_id,
@@ -166,7 +141,6 @@ async def upload_dataset(
     ds_res  = supabase.table("datasets").insert(record).execute()
     dataset = ds_res.data[0]
 
-    # ── 7. Auto-retrain check ─────────────────────────────────
     type_id           = unit.data[0]["compressor_type_id"]
     retrain_triggered = _check_auto_retrain(supabase, type_id, dataset["id"])
 
@@ -190,7 +164,6 @@ async def get_my_datasets(
     offset:      int = Query(0,  ge=0),
     current_user=Depends(get_current_user),
 ):
-    """Engineer: list own datasets for a unit (newest first), paginated."""
     supabase = get_supabase_client()
     user_id  = current_user["sub"]
 
@@ -211,7 +184,6 @@ async def get_my_datasets(
 
 @router.get("/admin/unit/{unit_uuid}")
 async def admin_unit_datasets(unit_uuid: str, current_user=Depends(require_admin)):
-    """Admin: ALL datasets for a unit across all engineers."""
     supabase = get_supabase_client()
     unit     = supabase.table("compressor_units").select("*").eq("id", unit_uuid).execute()
     if not unit.data:
@@ -220,7 +192,6 @@ async def admin_unit_datasets(unit_uuid: str, current_user=Depends(require_admin
     datasets_res = supabase.table("datasets").select("*") \
         .eq("unit_id", unit_uuid).order("created_at", desc=True).execute()
 
-    # Bulk-fetch uploaders
     user_ids  = list({d["user_id"] for d in datasets_res.data if d.get("user_id")})
     users_map = {}
     if user_ids:
@@ -234,7 +205,6 @@ async def admin_unit_datasets(unit_uuid: str, current_user=Depends(require_admin
 
     ct = supabase.table("compressor_types").select("name,manufacturer") \
         .eq("id", unit.data[0]["compressor_type_id"]).execute()
-
     return {
         "unit":     unit.data[0],
         "type":     ct.data[0] if ct.data else {},
@@ -245,7 +215,6 @@ async def admin_unit_datasets(unit_uuid: str, current_user=Depends(require_admin
 
 @router.get("/admin/type/{type_id}")
 async def admin_type_datasets(type_id: str, current_user=Depends(require_admin)):
-    """Admin: ALL datasets for a compressor type (all units, all users)."""
     supabase = get_supabase_client()
     ct       = supabase.table("compressor_types").select("*").eq("id", type_id).execute()
     if not ct.data:
@@ -256,21 +225,18 @@ async def admin_type_datasets(type_id: str, current_user=Depends(require_admin))
         .eq("compressor_type_id", type_id).execute()
     unit_ids = [u["id"] for u in units.data]
 
-    # Bulk fetch all datasets for these units
     all_datasets = []
     if unit_ids:
         ds_res       = supabase.table("datasets").select("*") \
             .in_("unit_id", unit_ids).order("created_at", desc=True).execute()
         all_datasets = ds_res.data
 
-    # Bulk fetch uploaders
     user_ids  = list({d["user_id"] for d in all_datasets if d.get("user_id")})
     users_map = {}
     if user_ids:
         ur = supabase.table("users").select("id,full_name,email").in_("id", user_ids).execute()
         users_map = {u["id"]: u for u in ur.data}
 
-    # Group datasets by unit_id
     ds_by_unit: dict[str, list] = {}
     for ds in all_datasets:
         ds["uploader"] = users_map.get(ds["user_id"], {})
@@ -291,7 +257,6 @@ async def admin_type_datasets(type_id: str, current_user=Depends(require_admin))
 
 @router.get("/{dataset_id}")
 async def get_dataset(dataset_id: str, current_user=Depends(get_current_user)):
-    """Single dataset metadata. Engineer: own only. Admin: any."""
     supabase = get_supabase_client()
     ds       = supabase.table("datasets").select("*").eq("id", dataset_id).execute()
     if not ds.data:
@@ -338,16 +303,9 @@ async def download_processed(dataset_id: str, current_user=Depends(get_current_u
     return {"url": url, "filename": dl_filename, "expires_in_seconds": 3600}
 
 
-# ══════════════════════════════════════════════════════════════
-# DELETE
-# ══════════════════════════════════════════════════════════════
-
-@router.delete("/{dataset_id}")
-async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)):
-    """
-    Delete dataset + storage files + linked analysis results.
-    Engineer: own only. Admin: any.
-    """
+@router.get("/{dataset_id}/download/{file_type}")
+async def download_by_type(dataset_id: str, file_type: str, current_user=Depends(get_current_user)):
+    """Generic download: file_type='raw'|'csv' → raw file, 'processed'|'excel'|'xlsx' → processed."""
     supabase = get_supabase_client()
     ds       = supabase.table("datasets").select("*").eq("id", dataset_id).execute()
     if not ds.data:
@@ -356,13 +314,40 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
     if current_user.get("role") == "engineer" and dataset["user_id"] != current_user["sub"]:
         raise HTTPException(403, "Access denied.")
 
-    # Delete storage files (non-critical — swallowed)
+    if file_type in ("processed", "excel", "xlsx"):
+        if not dataset.get("processed_file_path"):
+            raise HTTPException(404, "Processed file not ready yet.")
+        base        = dataset["original_filename"].rsplit(".", 1)[0]
+        dl_filename = f"{base}_processed.xlsx"
+        url         = get_dataset_download_url(dataset["processed_file_path"], expires_in=3600)
+    else:
+        if not dataset.get("raw_file_path"):
+            raise HTTPException(404, "Raw file not available.")
+        dl_filename = dataset["original_filename"]
+        url         = get_dataset_download_url(dataset["raw_file_path"], expires_in=3600)
+
+    return {"url": url, "filename": dl_filename, "expires_in_seconds": 3600}
+
+
+# ══════════════════════════════════════════════════════════════
+# DELETE
+# ══════════════════════════════════════════════════════════════
+
+@router.delete("/{dataset_id}")
+async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)):
+    supabase = get_supabase_client()
+    ds       = supabase.table("datasets").select("*").eq("id", dataset_id).execute()
+    if not ds.data:
+        raise HTTPException(404, "Dataset not found.")
+    dataset  = ds.data[0]
+    if current_user.get("role") == "engineer" and dataset["user_id"] != current_user["sub"]:
+        raise HTTPException(403, "Access denied.")
+
     if dataset.get("raw_file_path"):
         delete_dataset_file(dataset["raw_file_path"])
     if dataset.get("processed_file_path"):
         delete_dataset_file(dataset["processed_file_path"])
 
-    # Cascade-delete linked analysis results
     supabase.table("analysis_results").delete().eq("dataset_id", dataset_id).execute()
     supabase.table("datasets").delete().eq("id", dataset_id).execute()
     logger.info(f"Dataset {dataset_id} deleted by user {current_user.get('sub')}")
@@ -374,18 +359,12 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
 # ══════════════════════════════════════════════════════════════
 
 def _check_auto_retrain(supabase, compressor_type_id: str, new_dataset_id: str) -> bool:
-    """
-    Check if pending new rows have crossed the auto-retrain threshold.
-    Returns True if retrain was triggered.
-    """
     ml = supabase.table("ml_models") \
         .select("id,auto_retrain,retrain_threshold") \
         .eq("compressor_type_id", compressor_type_id) \
         .eq("is_active", True) \
         .order("trained_at", desc=True).limit(1).execute()
-
     if not ml.data:
-        # No model yet — mark as pending, wait for first manual retrain
         return False
 
     model = ml.data[0]
@@ -410,11 +389,10 @@ def _check_auto_retrain(supabase, compressor_type_id: str, new_dataset_id: str) 
             trigger_retrain_task(compressor_type_id, triggered_by="auto")
             logger.info(
                 f"Auto-retrain triggered for type {compressor_type_id} "
-                f"({total_new_rows} new rows ≥ threshold {threshold})"
+                f"({total_new_rows} new rows >= threshold {threshold})"
             )
             return True
         except Exception as e:
             logger.error(f"Auto-retrain trigger failed: {e}")
             return False
-
     return False
