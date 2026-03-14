@@ -350,14 +350,34 @@ class CompressorMLEngine:
         y_mech = self.clean_df[TARGET_MECH].fillna(0)
         y_spc  = self.clean_df[TARGET_SPC].fillna(0)
 
-        X_tr, X_te, y_tr, y_te = train_test_split(X, y_elec, test_size=0.2, random_state=42)
+        # ── 70 / 15 / 15  train / val / test split ──────────────
+        # Step 1: split off 30% as held-out (val + test)
+        X_tr, X_tmp, y_tr, y_tmp = train_test_split(
+            X, y_elec, test_size=0.30, random_state=42)
+        # Step 2: split the 30% into equal val and test (15% each)
+        X_val, X_te, y_val, y_te = train_test_split(
+            X_tmp, y_tmp, test_size=0.50, random_state=42)
+
+        # Guard: if dataset is tiny fall back to 80/20 (no val set)
+        use_val = len(X_val) >= 5
+        if not use_val:
+            X_tr, X_te, y_tr, y_te = train_test_split(X, y_elec, test_size=0.2, random_state=42)
+            X_val, y_val = X_te, y_te   # reuse test as val for curves
 
         self.model_elec = GradientBoostingRegressor(
-            n_estimators=150, learning_rate=0.05, max_depth=5, random_state=42)
+            n_estimators=150, learning_rate=0.05, max_depth=5,
+            subsample=0.8,          # best-practice: row subsampling per tree
+            min_samples_leaf=3,     # prevents overfitting on small clusters
+            validation_fraction=0.1 if use_val else 0.0,
+            n_iter_no_change=15 if use_val else None,  # early stopping
+            random_state=42)
         self.model_elec.fit(X_tr, y_tr)
 
-        y_pred            = self.model_elec.predict(X_te)
-        self.scores["r2"] = round(float(r2_score(y_te, y_pred) * 100), 2)
+        y_pred_val        = self.model_elec.predict(X_val)
+        y_pred_te         = self.model_elec.predict(X_te)
+        self.scores["r2"] = round(float(r2_score(y_te, y_pred_te) * 100), 2)
+        # Val MAE — useful for detecting overfitting
+        self.scores["val_mae"] = round(float(mean_absolute_error(y_val, y_pred_val)), 4)
 
         median_spc  = self.clean_df[TARGET_SPC].median()
         y_true_cls  = (self.clean_df[TARGET_SPC] < median_spc).astype(int)
@@ -368,13 +388,19 @@ class CompressorMLEngine:
         except Exception:
             self.scores["f1"] = 66.67
 
-        self.model_mech = GradientBoostingRegressor(n_estimators=100, random_state=42)
-        self.model_mech.fit(X, y_mech)
-        self.model_spc  = GradientBoostingRegressor(n_estimators=100, random_state=42)
-        self.model_spc.fit(X, y_spc)
+        # Mech + SPC: train on same 70% indices for consistency
+        y_mech_tr = y_mech.iloc[X_tr.index] if hasattr(X_tr, "index") else y_mech[:len(X_tr)]
+        y_spc_tr  = y_spc.iloc[X_tr.index]  if hasattr(X_tr, "index") else y_spc[:len(X_tr)]
+        self.model_mech = GradientBoostingRegressor(
+            n_estimators=100, subsample=0.8, min_samples_leaf=3, random_state=42)
+        self.model_mech.fit(X_tr, y_mech_tr)
+        self.model_spc  = GradientBoostingRegressor(
+            n_estimators=100, subsample=0.8, min_samples_leaf=3, random_state=42)
+        self.model_spc.fit(X_tr, y_spc_tr)
 
-        train_curve = [float(mean_absolute_error(y_tr, p)) for p in self.model_elec.staged_predict(X_tr)]
-        test_curve  = [float(mean_absolute_error(y_te, p)) for p in self.model_elec.staged_predict(X_te)]
+        train_curve = [float(mean_absolute_error(y_tr,   p)) for p in self.model_elec.staged_predict(X_tr)]
+        val_curve   = [float(mean_absolute_error(y_val,  p)) for p in self.model_elec.staged_predict(X_val)]
+        test_curve  = [float(mean_absolute_error(y_te,   p)) for p in self.model_elec.staged_predict(X_te)]
 
         # ── STEP 3: Genetic Algorithm Optimisation ───────────────
         bounds = [
@@ -430,7 +456,7 @@ class CompressorMLEngine:
             "power_saving_percent":      round(saving_pct, 2),
             "feature_importance":        feature_importance,
             "was_raw":                   was_raw,
-            "training_curve":            {"train": train_curve, "test": test_curve},
+            "training_curve":            {"train": train_curve, "val": val_curve, "test": test_curve},
             "cluster_stats": {
                 "total_points": int(len(df)),
                 "noise_points": int((df["Cluster_ID"] == -1).sum()),
