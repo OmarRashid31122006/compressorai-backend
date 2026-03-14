@@ -24,9 +24,10 @@ import logging
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Request
 from pydantic import BaseModel
 from typing import Optional
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from datetime import datetime, timezone
 
 from config import get_supabase_client
@@ -117,11 +118,35 @@ class AnalysisParams(BaseModel):
 
 @router.post("/validate-dataset")
 async def validate_upload(
-    file: UploadFile = File(...),
+    request: Request,
+    file:    Optional[UploadFile] = File(None),
+    dataset: Optional[UploadFile] = File(None),
+    upload:  Optional[UploadFile] = File(None),
+    data:    Optional[UploadFile] = File(None),
     current_user=Depends(get_current_user),
 ):
-    content = await file.read()
-    fname   = file.filename or "dataset"
+    """Accept file under any common field name; fallback to raw body scan."""
+    f = file or dataset or upload or data
+
+    if f is None:
+        try:
+            form = await request.form()
+            for val in form.values():
+                if isinstance(val, StarletteUploadFile):
+                    f = val
+                    break
+        except Exception:
+            pass
+
+    if f is None:
+        raise HTTPException(
+            422,
+            "No file received. Upload the dataset as multipart/form-data "
+            "(field name: 'file', 'dataset', 'upload', or 'data')."
+        )
+
+    content = await f.read()
+    fname   = getattr(f, "filename", None) or "dataset"
     try:
         if fname.lower().endswith(".csv"):
             df = pd.read_csv(io.BytesIO(content))
@@ -142,21 +167,9 @@ async def run_analysis_endpoint(
     params:      str = Form("{}"),
     current_user=Depends(get_current_user),
 ):
-    """
-    Full ML pipeline on an already-uploaded + processed dataset.
-
-    Steps:
-      1. Load dataset record + verify ownership
-      2. Load compressor unit + type
-      3. Load active ML model for this type (if exists) → warm-start
-      4. Download processed file from Supabase Storage
-      5. Run CompressorMLEngine (DBSCAN → GBR → GA)
-      6. Save result to analysis_results
-    """
     supabase = get_supabase_client()
     user_id  = current_user["sub"]
 
-    # ── Parse + sanitize params ──────────────────────────────
     try:
         raw_params = json.loads(params)
         if not isinstance(raw_params, dict):
@@ -165,7 +178,6 @@ async def run_analysis_endpoint(
         raw_params = {}
     user_params = sanitize_user_params(raw_params)
 
-    # ── 1. Load dataset ──────────────────────────────────────
     ds = supabase.table("datasets").select("*").eq("id", dataset_id).execute()
     if not ds.data:
         raise HTTPException(404, "Dataset not found.")
@@ -177,7 +189,6 @@ async def run_analysis_endpoint(
     if not dataset.get("processed_file_path"):
         raise HTTPException(422, "Dataset not processed yet. Please re-upload.")
 
-    # ── 2. Load compressor unit + type ───────────────────────
     unit_res = supabase.table("compressor_units") \
         .select("id,unit_id,compressor_type_id") \
         .eq("id", dataset["unit_id"]).execute()
@@ -185,25 +196,23 @@ async def run_analysis_endpoint(
         raise HTTPException(404, "Compressor unit not found.")
     u = unit_res.data[0]
 
-    # ── 3. Load active ML model (warm-start) ─────────────────
     ml = supabase.table("ml_models").select("*") \
         .eq("compressor_type_id", u["compressor_type_id"]) \
         .eq("is_active", True) \
         .order("trained_at", desc=True).limit(1).execute()
 
-    pretrained_data = None   # will be a dict (from pickle.loads)
+    pretrained_data = None
     ml_model_id     = None
     if ml.data and ml.data[0].get("model_path"):
         try:
             model_bytes     = get_ml_model_bytes(ml.data[0]["model_path"])
-            pretrained_data = pickle.loads(model_bytes)  # this is a dict, NOT an engine instance
+            pretrained_data = pickle.loads(model_bytes)
             ml_model_id     = ml.data[0]["id"]
             logger.info(f"Loaded pretrained model {ml_model_id} for warm-start.")
         except Exception as e:
             logger.warning(f"Could not load pretrained model: {e} — will train fresh.")
             pretrained_data = None
 
-    # ── 4. Download processed dataset ────────────────────────
     try:
         file_bytes = get_dataset_bytes(dataset["processed_file_path"])
         df         = pd.read_excel(io.BytesIO(file_bytes))
@@ -213,12 +222,9 @@ async def run_analysis_endpoint(
     if len(df) < 20:
         raise HTTPException(400, "Dataset too small — need at least 20 rows after cleaning.")
 
-    # ── 5. Run ML pipeline ───────────────────────────────────
     try:
         engine = CompressorMLEngine(dataset["unit_id"])
 
-        # FIXED: pretrained_data is a dict (from _save_model / pickle.dumps)
-        # Use isinstance check — not hasattr — because it's a plain dict
         if (
             pretrained_data is not None
             and isinstance(pretrained_data, dict)
@@ -238,10 +244,8 @@ async def run_analysis_endpoint(
         logger.exception("Analysis pipeline failed")
         raise HTTPException(500, f"Analysis failed: {str(e)}")
 
-    # ── 6. Save result ───────────────────────────────────────
     try:
         r = numpy_clean(results)
-        # Normalise score keys: engine returns 'convergence', DB stores 'ga_convergence'
         scores = r.get("scores", {})
         if "convergence" in scores and "ga_convergence" not in scores:
             scores["ga_convergence"] = scores.pop("convergence")
@@ -270,7 +274,7 @@ async def run_analysis_endpoint(
         results["result_id"] = saved.data[0]["id"] if saved.data else None
     except Exception as e:
         logger.error(f"Failed to save analysis result to DB: {e}")
-        results["result_id"] = None  # result still returned to client
+        results["result_id"] = None
 
     results["unit_label"]            = u["unit_id"]
     results["used_pretrained_model"] = pretrained_data is not None
@@ -288,12 +292,7 @@ async def get_analysis_history(
     offset:      int = 0,
     current_user=Depends(get_current_user),
 ):
-    """
-    Analysis history for a unit.
-    Engineers: own results only. Admins: all results.
-    Supports pagination via limit/offset.
-    """
-    limit  = min(max(1, limit), 100)   # clamp 1-100
+    limit  = min(max(1, limit), 100)
     offset = max(0, offset)
 
     supabase = get_supabase_client()
@@ -336,7 +335,6 @@ async def get_analysis_result(result_id: str, current_user=Depends(get_current_u
     if current_user.get("role") == "engineer" and result["user_id"] != current_user["sub"]:
         raise HTTPException(403, "Access denied.")
 
-    # Enrich with unit + type info
     unit = supabase.table("compressor_units") \
         .select("unit_id,compressor_type_id").eq("id", result["unit_id"]).execute()
     if unit.data:
@@ -355,7 +353,6 @@ async def get_analysis_result(result_id: str, current_user=Depends(get_current_u
 
 @router.get("/admin/unit/{unit_uuid}")
 async def admin_unit_results(unit_uuid: str, current_user=Depends(require_admin)):
-    """Admin: all analysis results for a unit across all engineers."""
     supabase = get_supabase_client()
 
     unit = supabase.table("compressor_units").select("*").eq("id", unit_uuid).execute()
@@ -365,7 +362,6 @@ async def admin_unit_results(unit_uuid: str, current_user=Depends(require_admin)
     results = supabase.table("analysis_results").select("*") \
         .eq("unit_id", unit_uuid).order("created_at", desc=True).execute()
 
-    # Bulk-fetch users to avoid N+1
     user_ids   = list({r["user_id"] for r in results.data if r.get("user_id")})
     users_res  = supabase.table("users").select("id,full_name,email") \
         .in_("id", user_ids).execute() if user_ids else type("R", (), {"data": []})()
