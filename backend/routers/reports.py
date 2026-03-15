@@ -7,6 +7,9 @@ FIX: /my endpoint uses analysis_results (not analyses)
 """
 import io
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+PKT = ZoneInfo("Asia/Karachi")  # Pakistan Standard Time UTC+5
 from typing import Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -73,8 +76,8 @@ async def generate_pdf_report(request: ReportRequest, current_user=Depends(get_c
 
         r    = request.analysis_results
         up   = request.user_params or {}
-        ts   = datetime.now().strftime("%d %B %Y  %H:%M")
-        ts_f = datetime.now().strftime("%d %b %Y %H:%M")
+        ts   = datetime.now(PKT).strftime("%d %B %Y  %H:%M")
+        ts_f = datetime.now(PKT).strftime("%d %b %Y %H:%M")
 
         saving    = r.get("power_saving_percent", 0) or 0
         best_elec = r.get("best_electrical_power", 0) or 0
@@ -356,7 +359,7 @@ async def generate_pdf_report(request: ReportRequest, current_user=Depends(get_c
         buf.seek(0)
         import re
         _safe = re.sub(r'[^\x00-\x7F]', '', request.compressor_name).replace(' ','_').strip('_') or 'report'
-        fname = f"CompressorAI_{_safe}_{datetime.now().strftime('%Y%m%d')}.pdf"
+        fname = f"CompressorAI_{_safe}_{datetime.now(PKT).strftime('%Y%m%d')}.pdf"
         return StreamingResponse(buf, media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
@@ -377,7 +380,7 @@ async def generate_excel_report(request: ReportRequest, current_user=Depends(get
         wb = openpyxl.Workbook()
         r  = request.analysis_results
         up = request.user_params or {}
-        ts = datetime.now().strftime("%d %B %Y  %H:%M")
+        ts = datetime.now(PKT).strftime("%d %B %Y  %H:%M")
 
         NAVY     = "0a1628"
         BLUE     = "1a3a6b"
@@ -587,7 +590,7 @@ async def generate_excel_report(request: ReportRequest, current_user=Depends(get
         buf.seek(0)
         import re
         _safe = re.sub(r'[^\x00-\x7F]', '', request.compressor_name).replace(' ','_').strip('_') or 'report'
-        fname = f"CompressorAI_{_safe}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+        fname = f"CompressorAI_{_safe}_{datetime.now(PKT).strftime('%Y%m%d')}.xlsx"
         return StreamingResponse(buf,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
