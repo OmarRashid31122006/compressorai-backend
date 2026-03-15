@@ -35,7 +35,12 @@ IS_PROD = APP_ENV == "production"
 # ── CORS origins ──────────────────────────────────────────────
 _raw_origins = os.getenv(
     "CORS_ORIGINS",
-    "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
+    (
+        "http://localhost:5173,"
+        "http://localhost:3000,"
+        "http://127.0.0.1:5173,"
+        "https://compressorai-frontend-kappa.vercel.app"
+    )
 )
 CORS_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
