@@ -7,9 +7,6 @@ FIX: /my endpoint uses analysis_results (not analyses)
 """
 import io
 from datetime import datetime
-from zoneinfo import ZoneInfo
-
-PKT = ZoneInfo("Asia/Karachi")  # Pakistan Standard Time UTC+5
 from typing import Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -76,8 +73,8 @@ async def generate_pdf_report(request: ReportRequest, current_user=Depends(get_c
 
         r    = request.analysis_results
         up   = request.user_params or {}
-        ts   = datetime.now(PKT).strftime("%d %B %Y  %H:%M")
-        ts_f = datetime.now(PKT).strftime("%d %b %Y %H:%M")
+        ts   = datetime.now().strftime("%d %B %Y  %H:%M")
+        ts_f = datetime.now().strftime("%d %b %Y %H:%M")
 
         saving    = r.get("power_saving_percent", 0) or 0
         best_elec = r.get("best_electrical_power", 0) or 0
@@ -88,6 +85,14 @@ async def generate_pdf_report(request: ReportRequest, current_user=Depends(get_c
         opt_p     = r.get("optimal_parameters", {})
         fi        = r.get("feature_importance", {})
         cs        = r.get("cluster_stats", {})
+        # Cost savings
+        kw_saved          = r.get("kw_saved", 0) or 0
+        energy_saved_kwh  = r.get("energy_saved_kwh", 0) or 0
+        cost_saved_annual = r.get("cost_saved_annual", 0) or 0
+        cost_saved_monthly= r.get("cost_saved_monthly", 0) or 0
+        cost_per_kwh      = up.get("cost_per_kwh", 0) or 0
+        hours_per_day     = up.get("hours_per_day", 24) or 24
+        operating_days    = up.get("operating_days", 365) or 365
 
         story = []
         LM = 1.8*cm
@@ -203,7 +208,8 @@ async def generate_pdf_report(request: ReportRequest, current_user=Depends(get_c
             f"<b>{base_elec:.2f} kW</b> (baseline average) to <b>{best_elec:.2f} kW</b> (optimized target), "
             f"representing an <b><font color='#15803d'>{saving:.2f}% energy saving</font></b>. "
             f"Maximum mechanical output achieved: <b>{best_mech:.2f} kW</b>. "
-            f"Best Specific Power Consumption (SPC): <b>{best_spc:.4f} kW/(m³/min)</b>.",
+            f"Best Specific Power Consumption (SPC): <b>{best_spc:.4f} kW/(m³/min)</b>. "
+            f"Continuous power reduction: <b>{kw_saved:.4f} kW</b> per hour of operation.",
             body_s))
         story.append(Spacer(1, 0.35*cm))
 
@@ -241,7 +247,39 @@ async def generate_pdf_report(request: ReportRequest, current_user=Depends(get_c
             ("BOTTOMPADDING",(0,0), (-1,-1), 0),
         ]))
         story.append(kpi_t)
-        story.append(Spacer(1, 0.5*cm))
+        story.append(Spacer(1, 0.3*cm))
+
+        # Cost savings KPI row (always show energy units; cost only if tariff set)
+        cost_row_data = []
+        cost_row_data.append(kpi_card(
+            f"{kw_saved:.4f}", "kW SAVED", "continuous reduction",
+            colors.HexColor("#f0f9ff"), C_CYAN))
+        cost_row_data.append(kpi_card(
+            f"{energy_saved_kwh:,.0f}", "ENERGY SAVED / YEAR", "kWh",
+            colors.HexColor("#f0fdf4"), C_GREEN))
+        if cost_per_kwh > 0:
+            cost_row_data.append(kpi_card(
+                f"{cost_saved_annual:,.0f}", "COST SAVED / YEAR", f"@ {cost_per_kwh}/kWh",
+                colors.HexColor("#f0fdf4"), C_GREEN))
+            cost_row_data.append(kpi_card(
+                f"{cost_saved_monthly:,.0f}", "COST SAVED / MONTH", f"{hours_per_day}h/day · {operating_days} days",
+                colors.HexColor("#f0fdf4"), C_GREEN))
+        else:
+            cost_row_data.append(kpi_card(
+                "—", "COST SAVED / YEAR", "Enter tariff in parameters",
+                colors.HexColor("#f8fafc"), colors.HexColor("#94a3b8")))
+            cost_row_data.append(kpi_card(
+                "—", "COST SAVED / MONTH", "Enter tariff in parameters",
+                colors.HexColor("#f8fafc"), colors.HexColor("#94a3b8")))
+        cost_t = Table([cost_row_data], colWidths=[4.4*cm]*4, hAlign="LEFT")
+        cost_t.setStyle(TableStyle([
+            ("LEFTPADDING",  (0,0), (-1,-1), 2),
+            ("RIGHTPADDING", (0,0), (-1,-1), 2),
+            ("TOPPADDING",   (0,0), (-1,-1), 0),
+            ("BOTTOMPADDING",(0,0), (-1,-1), 0),
+        ]))
+        story.append(cost_t)
+        story.append(Spacer(1, 0.4*cm))
 
         # MODEL PERFORMANCE
         story.append(section_header("2.  Model Performance Scores"))
@@ -272,10 +310,14 @@ async def generate_pdf_report(request: ReportRequest, current_user=Depends(get_c
             ["Best SPC",                  f"{best_spc:.4f}",  "kW/(m³/min)","Specific Power Consumption at optimum"],
             ["Total Data Points",         str(cs.get("total_points",0)), "rows", "Raw dataset size"],
             ["Clean Data Points",         str(cs.get("clean_points",0)),  "rows", "After DBSCAN outlier removal"],
+            ["kW Saved (continuous)",      f"{kw_saved:.4f}",            "kW",   "Power reduction every hour of operation"],
+            ["Energy Saved / Year",        f"{energy_saved_kwh:,.2f}",   "kWh",  f"{hours_per_day}h/day × {operating_days} days × {kw_saved:.4f} kW"],
+            ["Cost Saved / Year",          f"{cost_saved_annual:,.0f}" if cost_per_kwh > 0 else "—", "" if cost_per_kwh <= 0 else f"(@ {cost_per_kwh}/kWh)", "Annual cost savings based on electricity tariff" if cost_per_kwh > 0 else "Set electricity tariff in parameters to calculate"],
+            ["Cost Saved / Month",         f"{cost_saved_monthly:,.0f}" if cost_per_kwh > 0 else "—", "",  "Annual cost savings ÷ 12"],
         ]
         story.append(make_table(res_data,
             col_widths=[5.5*cm, 3*cm, 3*cm, 7*cm],
-            green_cells=[(3,1)]))
+            green_cells=[(3,1),(8,1),(9,1)]))
         story.append(Spacer(1, 0.5*cm))
 
         if opt_p:
@@ -359,7 +401,7 @@ async def generate_pdf_report(request: ReportRequest, current_user=Depends(get_c
         buf.seek(0)
         import re
         _safe = re.sub(r'[^\x00-\x7F]', '', request.compressor_name).replace(' ','_').strip('_') or 'report'
-        fname = f"CompressorAI_{_safe}_{datetime.now(PKT).strftime('%Y%m%d')}.pdf"
+        fname = f"CompressorAI_{_safe}_{datetime.now().strftime('%Y%m%d')}.pdf"
         return StreamingResponse(buf, media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
@@ -380,7 +422,7 @@ async def generate_excel_report(request: ReportRequest, current_user=Depends(get
         wb = openpyxl.Workbook()
         r  = request.analysis_results
         up = request.user_params or {}
-        ts = datetime.now(PKT).strftime("%d %B %Y  %H:%M")
+        ts = datetime.now().strftime("%d %B %Y  %H:%M")
 
         NAVY     = "0a1628"
         BLUE     = "1a3a6b"
@@ -441,6 +483,13 @@ async def generate_excel_report(request: ReportRequest, current_user=Depends(get
         best_spc  = r.get("best_spc", 0) or 0
         scores    = r.get("scores", {})
         cs        = r.get("cluster_stats", {})
+        kw_saved_x          = r.get("kw_saved", 0) or 0
+        energy_saved_kwh_x  = r.get("energy_saved_kwh", 0) or 0
+        cost_saved_annual_x = r.get("cost_saved_annual", 0) or 0
+        cost_saved_monthly_x= r.get("cost_saved_monthly", 0) or 0
+        cost_per_kwh_x      = up.get("cost_per_kwh", 0) or 0
+        hours_per_day_x     = up.get("hours_per_day", 24) or 24
+        operating_days_x    = up.get("operating_days", 365) or 365
 
         ws1 = wb.active
         ws1.title = "Summary"
@@ -469,12 +518,18 @@ async def generate_excel_report(request: ReportRequest, current_user=Depends(get
         section_title(ws1, row, "KEY PERFORMANCE INDICATORS", 6)
         row += 1
         kpis = [
-            ("Energy Saving",           f"{saving:.2f}%",             True,  False),
-            ("Optimal Electrical Power", f"{best_elec:.3f} kW",       False, True),
-            ("Best Mechanical Power",    f"{best_mech:.3f} kW",       False, False),
-            ("Baseline Electrical",      f"{base_elec:.3f} kW",       False, False),
-            ("Best SPC",                 f"{best_spc:.4f} kW/m³/min", False, True),
+            ("Energy Saving",           f"{saving:.2f}%",              True,  False),
+            ("Optimal Electrical Power", f"{best_elec:.3f} kW",        False, True),
+            ("Best Mechanical Power",    f"{best_mech:.3f} kW",        False, False),
+            ("Baseline Electrical",      f"{base_elec:.3f} kW",        False, False),
+            ("Best SPC",                 f"{best_spc:.4f} kW/m³/min",  False, True),
             ("Clean Data Points",        f"{cs.get('clean_points',0)} / {cs.get('total_points',0)}", False, False),
+            ("kW Saved (continuous)",    f"{kw_saved_x:.4f} kW",       False, True),
+            ("Energy Saved / Year",      f"{energy_saved_kwh_x:,.2f} kWh", True, False),
+            ("Cost Saved / Year",        f"{cost_saved_annual_x:,.0f}" if cost_per_kwh_x > 0 else "Set tariff in params", cost_per_kwh_x > 0, False),
+            ("Cost Saved / Month",       f"{cost_saved_monthly_x:,.0f}" if cost_per_kwh_x > 0 else "—", cost_per_kwh_x > 0, False),
+            ("Electricity Tariff",       f"{cost_per_kwh_x}/kWh" if cost_per_kwh_x > 0 else "Not set", False, False),
+            ("Operating Hours",          f"{hours_per_day_x}h/day · {operating_days_x} days/yr", False, False),
         ]
         write_header_row(ws1, row, ["Metric", "Value", "Metric", "Value", "Metric", "Value"])
         row += 1
@@ -590,7 +645,7 @@ async def generate_excel_report(request: ReportRequest, current_user=Depends(get
         buf.seek(0)
         import re
         _safe = re.sub(r'[^\x00-\x7F]', '', request.compressor_name).replace(' ','_').strip('_') or 'report'
-        fname = f"CompressorAI_{_safe}_{datetime.now(PKT).strftime('%Y%m%d')}.xlsx"
+        fname = f"CompressorAI_{_safe}_{datetime.now().strftime('%Y%m%d')}.xlsx"
         return StreamingResponse(buf,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
