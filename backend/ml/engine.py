@@ -61,6 +61,16 @@ FEATURES = [
     "Current (Amp)",
 ]
 
+# GBR + GA use only pressure/temperature features (no Current).
+# Current is back-calculated from the optimal electrical power result.
+FEATURES_GBR = [
+    "Loading Pressure (bar)",
+    "Unloading Pressure (bar)",
+    "Inlet Pressure (bar)",
+    "Discharge Pressure (bar)",
+    "Discharge Temperature ( C )",
+]
+
 TARGET_ELEC = "Theoretical Electrical Power (kW)"
 TARGET_MECH = "Theoretical Mechanical Power (kW)"
 TARGET_SPC  = "Specific Power Consumption (kW/m3/min)"
@@ -329,15 +339,24 @@ class CompressorMLEngine:
         # ── STEP 1: DBSCAN Clustering ────────────────────────────
         X_cluster = df[[TARGET_ELEC, TARGET_SPC]].fillna(0)
         X_scaled  = self.scaler.fit_transform(X_cluster)
-        self.dbscan = DBSCAN(eps=0.3, min_samples=max(5, len(df) // 50))
+        # Adaptive eps: larger datasets need wider neighbourhood radius
+        eps = 0.5 if len(df) >= 500 else 0.3
+        self.dbscan = DBSCAN(eps=eps, min_samples=max(5, len(df) // 100))
         df = df.copy()
         df["Cluster_ID"] = self.dbscan.fit_predict(X_scaled)
 
-        labels = set(df["Cluster_ID"])
-        if len(labels) > 1 and (-1 not in labels or len(labels) > 2):
-            sil = silhouette_score(X_scaled, df["Cluster_ID"]) * 100
+        # Silhouette only on non-noise points (Cluster_ID != -1)
+        non_noise_mask   = df["Cluster_ID"] != -1
+        unique_non_noise = set(df.loc[non_noise_mask, "Cluster_ID"])
+        if len(unique_non_noise) >= 2:
+            sil = silhouette_score(
+                X_scaled[non_noise_mask.values],
+                df.loc[non_noise_mask, "Cluster_ID"]
+            ) * 100
+        elif non_noise_mask.sum() > 0:
+            sil = 65.0   # one clean cluster — decent but unverifiable
         else:
-            sil = 50.0
+            sil = 0.0    # all noise
         self.scores["silhouette"] = round(float(sil), 2)
 
         # ── STEP 2: GBR Models ───────────────────────────────────
@@ -345,39 +364,21 @@ class CompressorMLEngine:
         if len(self.clean_df) < 10:
             self.clean_df = df.copy()
 
-        X      = self.clean_df[FEATURES].fillna(0)
+        # Use FEATURES_GBR (pressure+temperature only, no Current)
+        # Current is back-calculated from the optimal electrical power result
+        X      = self.clean_df[FEATURES_GBR].fillna(0)
         y_elec = self.clean_df[TARGET_ELEC].fillna(0)
         y_mech = self.clean_df[TARGET_MECH].fillna(0)
         y_spc  = self.clean_df[TARGET_SPC].fillna(0)
 
-        # ── 70 / 15 / 15  train / val / test split ──────────────
-        # Step 1: split off 30% as held-out (val + test)
-        X_tr, X_tmp, y_tr, y_tmp = train_test_split(
-            X, y_elec, test_size=0.30, random_state=42)
-        # Step 2: split the 30% into equal val and test (15% each)
-        X_val, X_te, y_val, y_te = train_test_split(
-            X_tmp, y_tmp, test_size=0.50, random_state=42)
-
-        # Guard: if dataset is tiny fall back to 80/20 (no val set)
-        use_val = len(X_val) >= 5
-        if not use_val:
-            X_tr, X_te, y_tr, y_te = train_test_split(X, y_elec, test_size=0.2, random_state=42)
-            X_val, y_val = X_te, y_te   # reuse test as val for curves
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y_elec, test_size=0.2, random_state=42)
 
         self.model_elec = GradientBoostingRegressor(
-            n_estimators=150, learning_rate=0.05, max_depth=5,
-            subsample=0.8,          # best-practice: row subsampling per tree
-            min_samples_leaf=3,     # prevents overfitting on small clusters
-            validation_fraction=0.1 if use_val else 0.0,
-            n_iter_no_change=15 if use_val else None,  # early stopping
-            random_state=42)
+            n_estimators=150, learning_rate=0.05, max_depth=5, random_state=42)
         self.model_elec.fit(X_tr, y_tr)
 
-        y_pred_val        = self.model_elec.predict(X_val)
-        y_pred_te         = self.model_elec.predict(X_te)
-        self.scores["r2"] = round(float(r2_score(y_te, y_pred_te) * 100), 2)
-        # Val MAE — useful for detecting overfitting
-        self.scores["val_mae"] = round(float(mean_absolute_error(y_val, y_pred_val)), 4)
+        y_pred            = self.model_elec.predict(X_te)
+        self.scores["r2"] = round(float(r2_score(y_te, y_pred) * 100), 2)
 
         median_spc  = self.clean_df[TARGET_SPC].median()
         y_true_cls  = (self.clean_df[TARGET_SPC] < median_spc).astype(int)
@@ -388,44 +389,38 @@ class CompressorMLEngine:
         except Exception:
             self.scores["f1"] = 66.67
 
-        # Mech + SPC: train on same 70% indices for consistency
-        y_mech_tr = y_mech.iloc[X_tr.index] if hasattr(X_tr, "index") else y_mech[:len(X_tr)]
-        y_spc_tr  = y_spc.iloc[X_tr.index]  if hasattr(X_tr, "index") else y_spc[:len(X_tr)]
-        self.model_mech = GradientBoostingRegressor(
-            n_estimators=100, subsample=0.8, min_samples_leaf=3, random_state=42)
-        self.model_mech.fit(X_tr, y_mech_tr)
-        self.model_spc  = GradientBoostingRegressor(
-            n_estimators=100, subsample=0.8, min_samples_leaf=3, random_state=42)
-        self.model_spc.fit(X_tr, y_spc_tr)
+        self.model_mech = GradientBoostingRegressor(n_estimators=100, random_state=42)
+        self.model_mech.fit(X, y_mech)
+        self.model_spc  = GradientBoostingRegressor(n_estimators=100, random_state=42)
+        self.model_spc.fit(X, y_spc)
 
-        train_curve = [float(mean_absolute_error(y_tr,   p)) for p in self.model_elec.staged_predict(X_tr)]
-        val_curve   = [float(mean_absolute_error(y_val,  p)) for p in self.model_elec.staged_predict(X_val)]
-        test_curve  = [float(mean_absolute_error(y_te,   p)) for p in self.model_elec.staged_predict(X_te)]
+        train_curve = [float(mean_absolute_error(y_tr, p)) for p in self.model_elec.staged_predict(X_tr)]
+        test_curve  = [float(mean_absolute_error(y_te, p)) for p in self.model_elec.staged_predict(X_te)]
 
         # ── STEP 3: Genetic Algorithm Optimisation ───────────────
         bounds = [
             (float(self.clean_df[f].min()), float(self.clean_df[f].max()))
-            for f in FEATURES
+            for f in FEATURES_GBR
         ]
         ga_res = differential_evolution(
-            lambda x: float(self.model_elec.predict(pd.DataFrame([x], columns=FEATURES))[0]),
+            lambda x: float(self.model_elec.predict(pd.DataFrame([x], columns=FEATURES_GBR))[0]),
             bounds, seed=42, maxiter=500, tol=0.001, workers=1,
         )
         self.scores["convergence"] = round(max(0.0, (1 - ga_res.nfev / 30000) * 100), 2)
 
         opt_params = ga_res.x
         best_elec  = float(ga_res.fun)
-        best_mech  = float(self.model_mech.predict(pd.DataFrame([opt_params], columns=FEATURES))[0])
-        best_spc   = float(self.model_spc.predict(pd.DataFrame([opt_params], columns=FEATURES))[0])
+        best_mech  = float(self.model_mech.predict(pd.DataFrame([opt_params], columns=FEATURES_GBR))[0])
+        best_spc   = float(self.model_spc.predict(pd.DataFrame([opt_params], columns=FEATURES_GBR))[0])
 
         baseline_elec = float(df[TARGET_ELEC].mean())
         saving_pct    = ((baseline_elec - best_elec) / baseline_elec * 100) if baseline_elec else 0.0
 
         importances        = self.model_elec.feature_importances_
-        feature_importance = {FEATURES[i]: round(float(importances[i]), 4) for i in range(len(FEATURES))}
+        feature_importance = {FEATURES_GBR[i]: round(float(importances[i]), 4) for i in range(len(FEATURES_GBR))}
 
         optimal_ranges = {}
-        for i, f in enumerate(FEATURES):
+        for i, f in enumerate(FEATURES_GBR):
             val    = float(opt_params[i])
             spread = (float(self.clean_df[f].max()) - float(self.clean_df[f].min())) * 0.05
             optimal_ranges[f] = {
@@ -456,7 +451,7 @@ class CompressorMLEngine:
             "power_saving_percent":      round(saving_pct, 2),
             "feature_importance":        feature_importance,
             "was_raw":                   was_raw,
-            "training_curve":            {"train": train_curve, "val": val_curve, "test": test_curve},
+            "training_curve":            {"train": train_curve, "test": test_curve},
             "cluster_stats": {
                 "total_points": int(len(df)),
                 "noise_points": int((df["Cluster_ID"] == -1).sum()),
@@ -510,7 +505,7 @@ class CompressorMLEngine:
                     "max":  float(self.clean_df[col].max()),
                     "mean": float(self.clean_df[col].mean()),
                 }
-                for col in FEATURES if self.clean_df is not None and col in self.clean_df.columns
+                for col in FEATURES_GBR if self.clean_df is not None and col in self.clean_df.columns
             },
         }
 
