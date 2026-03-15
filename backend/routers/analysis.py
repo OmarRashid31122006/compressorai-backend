@@ -139,36 +139,29 @@ async def validate_upload(
 @router.post("/run/{dataset_id}")
 async def run_analysis_endpoint(
     dataset_id:  str,
-    request:     Request,
+    params:      str = Form("{}"),
     current_user=Depends(get_current_user),
 ):
     """
     Full ML pipeline on an already-uploaded + processed dataset.
-    Accepts params in ANY format:
-      - JSON body: {"params": {...}} or just {...}
-      - Form data: params="{...}"
-      - No body: uses defaults
+
+    Steps:
+      1. Load dataset record + verify ownership
+      2. Load compressor unit + type
+      3. Load active ML model for this type (if exists) → warm-start
+      4. Download processed file from Supabase Storage
+      5. Run CompressorMLEngine (DBSCAN → GBR → GA)
+      6. Save result to analysis_results
     """
     supabase = get_supabase_client()
     user_id  = current_user["sub"]
 
-    # ── Parse params from ANY request format ─────────────────
-    raw_params = {}
+    # ── Parse + sanitize params ──────────────────────────────
     try:
-        content_type = request.headers.get("content-type", "")
-        if "application/json" in content_type:
-            body = await request.json()
-            if isinstance(body, dict):
-                # Accept {"params": {...}} or just {...}
-                raw_params = body.get("params", body)
-        elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
-            form = await request.form()
-            params_str = form.get("params", "{}")
-            raw_params = json.loads(params_str) if params_str else {}
-        # else: no body → use defaults
+        raw_params = json.loads(params)
+        if not isinstance(raw_params, dict):
+            raw_params = {}
     except Exception:
-        raw_params = {}
-    if not isinstance(raw_params, dict):
         raw_params = {}
     user_params = sanitize_user_params(raw_params)
 
@@ -265,6 +258,11 @@ async def run_analysis_endpoint(
             "best_spc":                  r.get("best_spc"),
             "baseline_electrical_power": r.get("baseline_electrical_power"),
             "power_saving_percent":      r.get("power_saving_percent"),
+            # Cost savings — stored for report generation
+            "energy_saved_kwh":          r.get("energy_saved_kwh"),
+            "cost_saved_annual":         r.get("cost_saved_annual"),
+            "cost_saved_monthly":        r.get("cost_saved_monthly"),
+            "kw_saved":                  r.get("kw_saved"),
             "user_params":               user_params,
             "feature_importance":        r.get("feature_importance"),
             "scatter_data":              r.get("scatter_data"),
@@ -320,10 +318,12 @@ async def get_analysis_history(
         q = q.eq("user_id", current_user["sub"])
 
     res = q.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
-    # Return plain array — frontend expects array directly
-    # Also include wrapper keys for any admin consumers
-    data = res.data or []
-    return data
+    return {
+        "data":   res.data or [],
+        "limit":  limit,
+        "offset": offset,
+        "count":  len(res.data or []),
+    }
 
 
 # ══════════════════════════════════════════════════════════════
