@@ -16,7 +16,7 @@ from pydantic import BaseModel, field_validator
 from typing import Optional
 from datetime import datetime, timezone
 
-from config import get_supabase_client
+from config import get_supabase_client, get_supabase_admin_client
 from deps import get_current_user, require_admin, require_admin_db, require_default_admin
 from routers.auth import hash_password
 
@@ -41,7 +41,7 @@ async def get_stats(current_user=Depends(require_admin)):
     """
     Dashboard stats. Uses COUNT queries — no full table scans.
     """
-    supabase = get_supabase_client()
+    supabase = get_supabase_admin_client()
 
     users_res  = supabase.table("users").select("id,role,is_active").execute()
     units_res  = supabase.table("compressor_units").select("id,is_active").execute()
@@ -78,7 +78,7 @@ async def get_all_users(
     offset: int = Query(0,  ge=0),
     role:   Optional[str] = Query(None),
 ):
-    supabase = get_supabase_client()
+    supabase = get_supabase_admin_client()
     fields   = (
         "id,email,full_name,role,company,is_active,is_email_verified,"
         "is_default_admin,agreed_to_terms,created_at,last_login,deleted_at"
@@ -93,7 +93,7 @@ async def get_all_users(
 # ── Single User Detail ────────────────────────────────────────
 @router.get("/users/{user_id}")
 async def get_user_detail(user_id: str, current_user=Depends(require_admin)):
-    supabase = get_supabase_client()
+    supabase = get_supabase_admin_client()
     fields   = (
         "id,email,full_name,role,company,is_active,is_email_verified,"
         "is_default_admin,agreed_to_terms,created_at,last_login"
@@ -131,7 +131,7 @@ async def get_user_detail(user_id: str, current_user=Depends(require_admin)):
 # ── Soft Delete User ──────────────────────────────────────────
 @router.delete("/users/{user_id}")
 async def delete_user(user_id: str, current_user=Depends(require_admin_db)):
-    supabase   = get_supabase_client()
+    supabase = get_supabase_admin_client()
     target_res = supabase.table("users").select(
         "id,email,role,is_default_admin"
     ).eq("id", user_id).execute()
@@ -157,7 +157,7 @@ async def delete_user(user_id: str, current_user=Depends(require_admin_db)):
 # ── Toggle Active ─────────────────────────────────────────────
 @router.put("/users/{user_id}/toggle-active")
 async def toggle_active(user_id: str, current_user=Depends(require_admin_db)):
-    supabase   = get_supabase_client()
+    supabase = get_supabase_admin_client()
     target_res = supabase.table("users").select(
         "id,email,role,is_active,is_default_admin"
     ).eq("id", user_id).execute()
@@ -175,47 +175,6 @@ async def toggle_active(user_id: str, current_user=Depends(require_admin_db)):
     action = "activated" if new_status else "deactivated"
     logger.info(f"Admin {current_user.get('email')} {action} user {target['email']}")
     return {"message": f"User {action} successfully.", "is_active": new_status}
-
-
-# ── Change Role ──────────────────────────────────────────────
-class ChangeRoleRequest(BaseModel):
-    role: str
-
-    @field_validator("role")
-    @classmethod
-    def valid_role(cls, v: str) -> str:
-        if v not in ("admin", "engineer"):
-            raise ValueError("Role must be 'admin' or 'engineer'.")
-        return v
-
-
-@router.put("/users/{user_id}/role")
-async def change_user_role(
-    user_id: str,
-    data:    ChangeRoleRequest,
-    current_user=Depends(require_admin_db),
-):
-    supabase   = get_supabase_client()
-    target_res = supabase.table("users").select(
-        "id,email,role,is_default_admin"
-    ).eq("id", user_id).execute()
-    if not target_res.data:
-        raise HTTPException(404, "User not found.")
-    target = target_res.data[0]
-
-    if target.get("is_default_admin"):
-        raise HTTPException(403, "Cannot change the default admin's role.")
-    if target["id"] == current_user.get("sub"):
-        raise HTTPException(400, "You cannot change your own role.")
-    if target["role"] == "admin" and not current_user.get("is_default_admin"):
-        raise HTTPException(403, "Only the default admin can change admin roles.")
-
-    supabase.table("users").update({"role": data.role}).eq("id", user_id).execute()
-    logger.info(
-        f"Admin {current_user.get('email')} changed {target['email']} "
-        f"role: {target['role']} → {data.role}"
-    )
-    return {"message": f"Role updated to '{data.role}'.", "role": data.role}
 
 
 # ── Reset Password ────────────────────────────────────────────
@@ -236,7 +195,7 @@ async def reset_password(
     data:    ResetPasswordRequest,
     current_user=Depends(require_admin_db),
 ):
-    supabase   = get_supabase_client()
+    supabase = get_supabase_admin_client()
     target_res = supabase.table("users").select(
         "id,email,role,is_default_admin"
     ).eq("id", user_id).execute()
@@ -263,7 +222,7 @@ async def get_all_compressors(current_user=Depends(require_admin)):
     All compressor units with user_count + analysis_count.
     Bulk-fetched to avoid N+1.
     """
-    supabase = get_supabase_client()
+    supabase = get_supabase_admin_client()
     units    = supabase.table("compressor_units").select("*") \
         .order("created_at", desc=False).execute()
     if not units.data:
@@ -299,7 +258,7 @@ async def get_all_compressors(current_user=Depends(require_admin)):
 # ── Datasets for a Compressor Unit ────────────────────────────
 @router.get("/compressors/{unit_id}/datasets")
 async def get_compressor_datasets(unit_id: str, current_user=Depends(require_admin)):
-    supabase = get_supabase_client()
+    supabase = get_supabase_admin_client()
     result   = supabase.table("datasets").select(
         "id,user_id,original_filename,total_rows,clean_rows,"
         "was_raw,cleaning_summary,is_processed,created_at"
@@ -328,7 +287,7 @@ async def get_compressor_datasets(unit_id: str, current_user=Depends(require_adm
 async def get_user_compressor_datasets(
     user_id: str, unit_id: str, current_user=Depends(require_admin)
 ):
-    supabase = get_supabase_client()
+    supabase = get_supabase_admin_client()
     result   = supabase.table("datasets").select("*") \
         .eq("user_id", user_id).eq("unit_id", unit_id) \
         .order("created_at", desc=True).execute()
@@ -338,7 +297,7 @@ async def get_user_compressor_datasets(
 # ── Single Analysis Result ────────────────────────────────────
 @router.get("/analyses/{analysis_id}")
 async def get_analysis_detail(analysis_id: str, current_user=Depends(require_admin)):
-    supabase = get_supabase_client()
+    supabase = get_supabase_admin_client()
     result   = supabase.table("analysis_results").select("*").eq("id", analysis_id).execute()
     if not result.data:
         raise HTTPException(404, "Analysis not found.")
@@ -349,7 +308,7 @@ async def get_analysis_detail(analysis_id: str, current_user=Depends(require_adm
 @router.post("/retrain/{type_id}")
 async def retrain_model(type_id: str, current_user=Depends(require_admin)):
     """Trigger retrain for a compressor type (delegates to retrain router)."""
-    supabase = get_supabase_client()
+    supabase = get_supabase_admin_client()
 
     units    = supabase.table("compressor_units").select("id") \
         .eq("compressor_type_id", type_id).execute()
