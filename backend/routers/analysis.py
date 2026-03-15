@@ -72,21 +72,29 @@ PARAM_DEFAULTS = {
     "p_high":             10.0,
     "q_low":              45.23,
     "q_high":             35.47,
+    "hours_per_day":      24.0,
+    "cost_per_kwh":       0.0,
+    "operating_days":     365,
 }
 
 PARAM_RANGES = {
-    "voltage":            (100, 1000),
+    "voltage":            (100, 11000),
     "power_factor":       (0.5, 1.0),
     "compression_stages": (1, 6),
     "p_low":              (1.0, 50.0),
     "p_high":             (1.0, 50.0),
     "q_low":              (1.0, 500.0),
     "q_high":             (1.0, 500.0),
+    "hours_per_day":      (1.0, 24.0),
+    "cost_per_kwh":       (0.0, 100000.0),
+    "operating_days":     (1, 365),
 }
 
 
 def sanitize_user_params(raw: dict) -> dict:
-    """Apply defaults and clamp to safe ranges."""
+    """Apply defaults and clamp to safe ranges.
+    Passes cost params (hours_per_day, cost_per_kwh, operating_days) to engine.
+    """
     params = {**PARAM_DEFAULTS}
     for key, (lo, hi) in PARAM_RANGES.items():
         if key in raw and raw[key] is not None:
@@ -258,11 +266,10 @@ async def run_analysis_endpoint(
             "best_spc":                  r.get("best_spc"),
             "baseline_electrical_power": r.get("baseline_electrical_power"),
             "power_saving_percent":      r.get("power_saving_percent"),
-            # Cost savings — stored for report generation
+            "kw_saved":                  r.get("kw_saved"),
             "energy_saved_kwh":          r.get("energy_saved_kwh"),
             "cost_saved_annual":         r.get("cost_saved_annual"),
             "cost_saved_monthly":        r.get("cost_saved_monthly"),
-            "kw_saved":                  r.get("kw_saved"),
             "user_params":               user_params,
             "feature_importance":        r.get("feature_importance"),
             "scatter_data":              r.get("scatter_data"),
