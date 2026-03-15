@@ -242,7 +242,8 @@ async def get_my_units(current_user=Depends(get_current_user)):
         # This user's dataset count for this unit
         ds = supabase.table("datasets").select("id", count="exact") \
             .eq("unit_id", u["id"]).eq("user_id", current_user["sub"]).execute()
-        u["my_dataset_count"] = ds.count or 0
+        u["dataset_count"]    = ds.count or 0
+        u["my_dataset_count"] = ds.count or 0  # keep both for compat
 
         # Latest analysis result
         ar = supabase.table("analysis_results") \
@@ -367,8 +368,10 @@ async def get_unit_stats(unit_uuid: str, current_user=Depends(get_current_user))
     savings = [d.get("power_saving_percent") or 0 for d in data]
     return {
         "total_analyses":        len(data),
-        "best_power_saving_pct": round(max(savings), 2),
-        "avg_power_saving_pct":  round(sum(savings) / len(savings), 2),
+        "best_power_saving_pct":     round(max(savings), 2),
+        "avg_power_saving_pct":      round(sum(savings) / len(savings), 2),
+        "best_power_saving_percent": round(max(savings), 2),
+        "avg_power_saving_percent":  round(sum(savings) / len(savings), 2),
         "latest_analysis":       data[0],
         "trend": [
             {"date":       d["created_at"][:10],
@@ -458,3 +461,19 @@ def _link_user_to_unit(supabase, user_id: str, unit_id: str):
         supabase.table("user_units").insert({
             "user_id": user_id, "unit_id": unit_id
         }).execute()
+
+# ── Short aliases — frontend calls /compressors/my and /compressors/search ──
+@router.get("/my", include_in_schema=False)
+async def get_my_units_alias(current_user=Depends(get_current_user)):
+    """Alias for /units/my — for frontend compatibility."""
+    return await get_my_units(current_user=current_user)
+
+
+@router.get("/search", include_in_schema=False)
+async def search_units_alias(
+    q: str = "",
+    type_id: str = "",
+    current_user=Depends(get_current_user),
+):
+    """Alias for /units/search — for frontend compatibility."""
+    return await search_units(q=q, type_id=type_id, current_user=current_user)
