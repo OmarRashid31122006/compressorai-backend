@@ -135,7 +135,7 @@ async def send_verification_email(to_email: str, full_name: str, code: str) -> b
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"⚡ CompressorAI — Your code: {code_disp}"
-    msg["From"]    = f"CompressorAI <{smtp_from}>"
+    msg["From"]    = smtp_from
     msg["To"]      = to_email
     msg.attach(MIMEText(html, "html"))
 
