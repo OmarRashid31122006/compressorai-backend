@@ -126,24 +126,21 @@ async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": detail})
 
 
-# ── Routers ───────────────────────────────────────────────────
-# ── Routers with /api prefix (canonical) ─────────────────────
-app.include_router(auth.router,        prefix="/api/auth",        tags=["Authentication"])
-app.include_router(admin.router,       prefix="/api/admin",       tags=["Admin"])
-app.include_router(compressors.router, prefix="/api/compressors", tags=["Compressors"])
-app.include_router(datasets.router,    prefix="/api/datasets",    tags=["Datasets"])
-app.include_router(analysis.router,    prefix="/api/analysis",    tags=["Analysis"])
-app.include_router(retrain.router,     prefix="/api/retrain",     tags=["Retrain"])
-app.include_router(reports.router,     prefix="/api/reports",     tags=["Reports"])
+# ── Routers — dual-mount: with AND without /api prefix ────────
+# Frontend may call /auth/login OR /api/auth/login depending on version
+for _prefix in ("/api", ""):
+    app.include_router(auth.router,        prefix=f"{_prefix}/auth",        tags=["Authentication"])
+    app.include_router(admin.router,       prefix=f"{_prefix}/admin",       tags=["Admin"])
+    app.include_router(compressors.router, prefix=f"{_prefix}/compressors", tags=["Compressors"])
+    app.include_router(datasets.router,    prefix=f"{_prefix}/datasets",    tags=["Datasets"])
+    app.include_router(analysis.router,    prefix=f"{_prefix}/analysis",    tags=["Analysis"])
+    app.include_router(retrain.router,     prefix=f"{_prefix}/retrain",     tags=["Retrain"])
+    app.include_router(reports.router,     prefix=f"{_prefix}/reports",     tags=["Reports"])
 
-# ── Same routers WITHOUT /api prefix (Vercel frontend compatibility) ──
-app.include_router(auth.router,        prefix="/auth",        tags=["Auth-alias"],        include_in_schema=False)
-app.include_router(admin.router,       prefix="/admin",       tags=["Admin-alias"],       include_in_schema=False)
-app.include_router(compressors.router, prefix="/compressors", tags=["Compressors-alias"], include_in_schema=False)
-app.include_router(datasets.router,    prefix="/datasets",    tags=["Datasets-alias"],    include_in_schema=False)
-app.include_router(analysis.router,    prefix="/analysis",    tags=["Analysis-alias"],    include_in_schema=False)
-app.include_router(retrain.router,     prefix="/retrain",     tags=["Retrain-alias"],     include_in_schema=False)
-app.include_router(reports.router,     prefix="/reports",     tags=["Reports-alias"],     include_in_schema=False)
+# Health alias without /api prefix
+@app.get("/health", include_in_schema=False)
+async def health_alias():
+    return await health_check()
 
 
 # ── Health / root ─────────────────────────────────────────────
@@ -152,7 +149,6 @@ async def root():
     return {"message": "CompressorAI v5 API is running", "version": "5.0.0"}
 
 
-@app.get("/health", tags=["System"], include_in_schema=False)
 @app.get("/api/health", tags=["System"])
 async def health_check():
     try:
