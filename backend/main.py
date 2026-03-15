@@ -127,6 +127,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 # ── Routers ───────────────────────────────────────────────────
+# ── Routers with /api prefix (canonical) ─────────────────────
 app.include_router(auth.router,        prefix="/api/auth",        tags=["Authentication"])
 app.include_router(admin.router,       prefix="/api/admin",       tags=["Admin"])
 app.include_router(compressors.router, prefix="/api/compressors", tags=["Compressors"])
@@ -135,6 +136,15 @@ app.include_router(analysis.router,    prefix="/api/analysis",    tags=["Analysi
 app.include_router(retrain.router,     prefix="/api/retrain",     tags=["Retrain"])
 app.include_router(reports.router,     prefix="/api/reports",     tags=["Reports"])
 
+# ── Same routers WITHOUT /api prefix (Vercel frontend compatibility) ──
+app.include_router(auth.router,        prefix="/auth",        tags=["Auth-alias"],        include_in_schema=False)
+app.include_router(admin.router,       prefix="/admin",       tags=["Admin-alias"],       include_in_schema=False)
+app.include_router(compressors.router, prefix="/compressors", tags=["Compressors-alias"], include_in_schema=False)
+app.include_router(datasets.router,    prefix="/datasets",    tags=["Datasets-alias"],    include_in_schema=False)
+app.include_router(analysis.router,    prefix="/analysis",    tags=["Analysis-alias"],    include_in_schema=False)
+app.include_router(retrain.router,     prefix="/retrain",     tags=["Retrain-alias"],     include_in_schema=False)
+app.include_router(reports.router,     prefix="/reports",     tags=["Reports-alias"],     include_in_schema=False)
+
 
 # ── Health / root ─────────────────────────────────────────────
 @app.get("/", include_in_schema=False)
@@ -142,6 +152,7 @@ async def root():
     return {"message": "CompressorAI v5 API is running", "version": "5.0.0"}
 
 
+@app.get("/health", tags=["System"], include_in_schema=False)
 @app.get("/api/health", tags=["System"])
 async def health_check():
     try:
