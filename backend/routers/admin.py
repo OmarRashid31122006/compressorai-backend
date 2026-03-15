@@ -177,6 +177,47 @@ async def toggle_active(user_id: str, current_user=Depends(require_admin_db)):
     return {"message": f"User {action} successfully.", "is_active": new_status}
 
 
+# ── Change Role ──────────────────────────────────────────────
+class ChangeRoleRequest(BaseModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def valid_role(cls, v: str) -> str:
+        if v not in ("admin", "engineer"):
+            raise ValueError("Role must be 'admin' or 'engineer'.")
+        return v
+
+
+@router.put("/users/{user_id}/role")
+async def change_user_role(
+    user_id: str,
+    data:    ChangeRoleRequest,
+    current_user=Depends(require_admin_db),
+):
+    supabase   = get_supabase_client()
+    target_res = supabase.table("users").select(
+        "id,email,role,is_default_admin"
+    ).eq("id", user_id).execute()
+    if not target_res.data:
+        raise HTTPException(404, "User not found.")
+    target = target_res.data[0]
+
+    if target.get("is_default_admin"):
+        raise HTTPException(403, "Cannot change the default admin's role.")
+    if target["id"] == current_user.get("sub"):
+        raise HTTPException(400, "You cannot change your own role.")
+    if target["role"] == "admin" and not current_user.get("is_default_admin"):
+        raise HTTPException(403, "Only the default admin can change admin roles.")
+
+    supabase.table("users").update({"role": data.role}).eq("id", user_id).execute()
+    logger.info(
+        f"Admin {current_user.get('email')} changed {target['email']} "
+        f"role: {target['role']} → {data.role}"
+    )
+    return {"message": f"Role updated to '{data.role}'.", "role": data.role}
+
+
 # ── Reset Password ────────────────────────────────────────────
 class ResetPasswordRequest(BaseModel):
     new_password: str
@@ -335,34 +376,3 @@ async def retrain_model(type_id: str, current_user=Depends(require_admin)):
         "type_id":       type_id,
         "analyses_used": len(analyses.data),
     }
-
-# ── Change User Role ──────────────────────────────────────────
-@router.put("/users/{user_id}/role")
-async def change_user_role(
-    user_id: str,
-    role: str,
-    current_user=Depends(require_default_admin),
-):
-    """
-    Default admin only: change a user's role between admin and engineer.
-    Cannot change the default admin's role.
-    """
-    if role not in ("admin", "engineer"):
-        raise HTTPException(400, "Invalid role. Must be 'admin' or 'engineer'.")
-
-    supabase   = get_supabase_client()
-    target_res = supabase.table("users").select(
-        "id,email,role,is_default_admin"
-    ).eq("id", user_id).execute()
-    if not target_res.data:
-        raise HTTPException(404, "User not found.")
-    target = target_res.data[0]
-
-    if target.get("is_default_admin"):
-        raise HTTPException(403, "Cannot change the default admin's role.")
-    if target["id"] == current_user.get("sub"):
-        raise HTTPException(400, "Cannot change your own role.")
-
-    supabase.table("users").update({"role": role}).eq("id", user_id).execute()
-    logger.info(f"Admin {current_user.get('email')} changed role of {target['email']} to {role}")
-    return {"message": f"Role updated to '{role}' successfully.", "role": role}
