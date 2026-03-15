@@ -126,7 +126,8 @@ async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": detail})
 
 
-# ── Routers — dual-mount: with AND without /api prefix ────────
+# ── Routers ───────────────────────────────────────────────────
+# Dual-mount: both /api/... and /... work
 # Frontend may call /auth/login OR /api/auth/login depending on version
 for _prefix in ("/api", ""):
     app.include_router(auth.router,        prefix=f"{_prefix}/auth",        tags=["Authentication"])
@@ -137,7 +138,6 @@ for _prefix in ("/api", ""):
     app.include_router(retrain.router,     prefix=f"{_prefix}/retrain",     tags=["Retrain"])
     app.include_router(reports.router,     prefix=f"{_prefix}/reports",     tags=["Reports"])
 
-# Health alias without /api prefix
 @app.get("/health", include_in_schema=False)
 async def health_alias():
     return await health_check()
@@ -166,11 +166,15 @@ async def health_check():
 
 
 if __name__ == "__main__":
+    # Replit sets PORT env var automatically
+    # Always bind 0.0.0.0 — localhost won't work on Replit
     port = int(os.getenv("PORT", "8000"))
+    logger.info(f"Starting on http://0.0.0.0:{port}")
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",   # REQUIRED for Replit
+        host="0.0.0.0",
         port=port,
-        reload=False,      # Replit mein reload off rakho
-        workers=1,         # Free tier = 1 worker only
+        reload=False,
+        workers=1,
+        log_level="info",
     )
